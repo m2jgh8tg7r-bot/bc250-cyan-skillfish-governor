@@ -1,3 +1,56 @@
+# BC-250 Safe-Order Patch
+
+> このリポジトリは [filippor/cyan-skillfish-governor](https://github.com/filippor/cyan-skillfish-governor) を基に、
+> AMD BC-250 / Cyan Skillfish で確認したGPUダウンクロック時の安定性問題を調査・修正した派生版です。
+
+## この派生版の主な変更
+
+BC-250でGPU高負荷中に周波数を下げた際、
+システム全体がクラッシュする場合がありました。
+
+実機検証の結果、この派生版ではSMUによる周波数・電圧変更を次の順序に変更しています。
+
+- アップクロック: `VID → FREQ`
+- ダウンクロック: `FREQ → 2 ms待機 → VID`
+
+また、SMUの周波数readbackで一度 `6 MHz` という異常値を観測したため、
+毎回のreadbackだけで遷移方向を判断せず、
+最後に正常に設定した周波数を `last_freq` として追跡します。
+
+## 検証済み地点
+
+実機検証済みコード:
+
+- Commit: `90a9d44b2c65c632e4e4e27f38f443e33e809437`
+- Tag: `bc250-safeorder-2ms-known-good-20260918`
+
+主な検証内容:
+
+- FurMark高負荷下でRust TestMode 20サイクル
+- 高負荷ダウンクロック 40回を完走
+- 通常自動ガバナーで負荷ON/OFF 10サイクル
+- 自動ダウンクロック 120回を完走
+- 再起動後もsystemdから修正版が正常起動
+
+詳しい調査経緯、待機時間の比較、実装内容、rollback方法は
+[docs/BC250_SAFEORDER.md](docs/BC250_SAFEORDER.md) を参照してください。
+
+## 注意
+
+`2 ms` はAMDやBC-250の公式仕様値ではありません。
+
+今回の実機試験で、0.6～0.7 ms付近に安定性が変化する領域が観測されたため、
+余裕を持たせて採用した経験的な待機時間です。
+
+この派生版は実験・研究結果に基づくものであり、
+すべてのBC-250個体や設定で同じ結果を保証するものではありません。
+
+---
+
+## Upstream README
+
+以下は元の `cyan-skillfish-governor` のREADMEです。
+
 # Cyan Skillfish GPU Governor
 
 Adaptive GPU governor for the AMD Cyan Skillfish APU.
