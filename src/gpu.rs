@@ -193,6 +193,7 @@ fn init_device_handle(render_path: PathBuf) -> Result<DeviceHandle> {
 }
 struct SmuFreqStrategy {
     smu: Bc250Smu,
+    last_freq: u32,
 }
 
 impl SmuFreqStrategy {
@@ -203,20 +204,75 @@ impl SmuFreqStrategy {
         smu.set_gpu_max_temperature(80)?;
         smu.unforce_gfx_freq()?;
         smu.unforce_gfx_vid()?;
-        Ok(Self { smu })
+
+        let mut initial_freq = None;
+
+        for attempt in 1..=10 {
+            let freq = smu.get_gfx_frequency()?;
+
+            if (350..=2100).contains(&freq) {
+                initial_freq = Some(freq);
+                break;
+            }
+
+            debug!(
+                "Ignoring implausible SMU initial frequency {} MHz (attempt {}/10)",
+                freq, attempt
+            );
+
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let initial_freq = initial_freq.ok_or_else(|| {
+            IoError::other(
+                "failed to read a plausible initial GPU frequency from SMU"
+            )
+        })?;
+
+        debug!("SMU initial tracked frequency {} MHz", initial_freq);
+
+        Ok(Self {
+            smu,
+            last_freq: initial_freq,
+        })
     }
 }
 
 impl FreqStrategy for SmuFreqStrategy {
     fn change_freq(&mut self, freq: u32, vol: u32) -> Result<()> {
-        self.smu.force_gfx_vid(vol)?;
-        self.smu.force_gfx_freq(freq)?;
-        debug!("SMU set frequency to {} MHz with voltage {} mV", freq, vol);
+        let current_freq = self.last_freq;
+
+        if freq < current_freq {
+            // Downclock safely: lower frequency before lowering voltage.
+            self.smu.force_gfx_freq(freq)?;
+
+            // BC-250 needs a short settling interval before lowering VID
+            // after a downclock under heavy GPU load.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+
+            self.smu.force_gfx_vid(vol)?;
+            debug!(
+                "SMU downclock {} -> {} MHz, waited 2 ms, then voltage {} mV",
+                current_freq, freq, vol
+            );
+        } else {
+            // Upclock safely: raise voltage before raising frequency.
+            self.smu.force_gfx_vid(vol)?;
+            self.smu.force_gfx_freq(freq)?;
+            debug!(
+                "SMU upclock {} -> {} MHz, voltage {} mV first",
+                current_freq, freq, vol
+            );
+        }
+
+        // Update only after the complete frequency/voltage transition succeeds.
+        self.last_freq = freq;
+
         Ok(())
     }
 
     fn get_freq(&self) -> Result<u32> {
-        Ok(self.smu.get_gfx_frequency()?)
+        Ok(self.last_freq)
     }
 
     fn shutdown(&mut self) -> Result<()> {
